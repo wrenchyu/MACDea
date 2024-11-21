@@ -1,0 +1,267 @@
+//+------------------------------------------------------------------+
+//|                                                     MACD EA      |
+//|                        Copyright 2024, Your Name                 |
+//|                                       https://www.yourwebsite.com|
+//+------------------------------------------------------------------+
+#property strict
+
+// Input parameters
+input double UpperBreakoutLine = 0.002; // Adjustable line above zero
+input double LowerBreakoutLine = -0.002; // Adjustable line below zero
+input double RiskPercentage = 1.0; // Risk percentage per trade
+input int StopLossPips = 25; // Default stop loss in pips
+input int TakeProfitPips = 50; // Default take profit in pips
+input int FastEMA = 12; // Fast EMA period for MACD
+input int SlowEMA = 26; // Slow EMA period for MACD
+input int SignalSMA = 9; // Signal line period for MACD
+input double ATRStopLossFactor = 1.5; // ATR stop loss factor
+input double ATRTakeProfitFactor = 2.0; // ATR take profit factor
+input int ATRPeriod = 14; // ATR period
+input double LotSizeAdjustment = 1.0; // Lot size adjustment factor
+input int TrailingStopPips = 10; // Trailing stop in pips
+input int BreakEvenPips = 10; // Break-even level in pips
+input int TrailingStepPips = 5; // Step for trailing stop in pips
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                    |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    Print("MACD EA Initialized");
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                  |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Cleanup code if needed
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                              |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    double macd[], signal[], hist[];
+    int counted_bars = IndicatorCounted();
+    
+    ArraySetAsSeries(macd, true);
+    ArraySetAsSeries(signal, true);
+    ArraySetAsSeries(hist, true);
+
+    int limit = Bars - counted_bars;
+    if (counted_bars > 0) limit++;
+    limit = MathMin(limit, Bars - 1);  // Ensure limit does not exceed array bounds
+
+    // Resize arrays to accommodate the necessary elements
+    ArrayResize(macd, limit);
+    ArrayResize(signal, limit);
+    ArrayResize(hist, limit);
+
+    for (int i = 0; i < limit; i++)
+    {
+        macd[i] = iMACD(NULL, 0, FastEMA, SlowEMA, SignalSMA, PRICE_CLOSE, MODE_MAIN, i);
+        signal[i] = iMACD(NULL, 0, FastEMA, SlowEMA, SignalSMA, PRICE_CLOSE, MODE_SIGNAL, i);
+        hist[i] = macd[i] - signal[i];
+    }
+
+    double currentMACD = macd[0];
+    double currentSignal = signal[0];
+    double atr = iATR(Symbol(), 0, ATRPeriod, 0);
+    
+    // Open trades based on the adjustable lines above and below the zero line
+    if (currentMACD > UpperBreakoutLine && currentSignal > UpperBreakoutLine && !OrderExists(OP_BUY))
+    {
+        OpenOrder(OP_BUY, atr);
+    }
+    else if (currentMACD < LowerBreakoutLine && currentSignal < LowerBreakoutLine && !OrderExists(OP_SELL))
+    {
+        OpenOrder(OP_SELL, atr);
+    }
+
+    // Check for peaks in MACD histogram to exit trades
+    if (OrderExists(OP_BUY) && IsReversal(hist, OP_BUY))
+    {
+        CloseOrder(OP_BUY);
+    }
+    else if (OrderExists(OP_SELL) && IsReversal(hist, OP_SELL))
+    {
+        CloseOrder(OP_SELL);
+    }
+
+    // Implement trailing stop and break-even logic
+    ManageOpenOrders();
+}
+
+//+------------------------------------------------------------------+
+//| Open an order                                                     |
+//+------------------------------------------------------------------+
+void OpenOrder(int orderType, double atr)
+{
+    double price = (orderType == OP_BUY) ? Ask : Bid;
+    double lotSize = CalculateLotSize();
+    double stopLoss = (orderType == OP_BUY) ? price - ATRStopLossFactor * atr : price + ATRStopLossFactor * atr;
+    double takeProfit = (orderType == OP_BUY) ? price + ATRTakeProfitFactor * atr : price - ATRTakeProfitFactor * atr;
+
+    // Ensure the lot size is valid
+    lotSize = NormalizeDouble(lotSize, 2);
+    if (lotSize < MarketInfo(Symbol(), MODE_MINLOT))
+    {
+        Print("Error: Lot size too small.");
+        return;
+    }
+    if (lotSize > MarketInfo(Symbol(), MODE_MAXLOT))
+    {
+        Print("Error: Lot size too large.");
+        return;
+    }
+
+    // Ensure stop loss and take profit are valid
+    stopLoss = NormalizeDouble(stopLoss, Digits);
+    takeProfit = NormalizeDouble(takeProfit, Digits);
+
+    int ticket = OrderSend(Symbol(), orderType, lotSize, price, 3, stopLoss, takeProfit, "MACD EA", 0, 0, clrGreen);
+    if (ticket < 0)
+    {
+        Print("Error opening order: ", ErrorDescription(GetLastError()));
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size based on risk percentage                       |
+//+------------------------------------------------------------------+
+double CalculateLotSize()
+{
+    double accountRisk = AccountBalance() * (RiskPercentage / 100);
+    double pipValue = MarketInfo(Symbol(), MODE_TICKVALUE);
+
+    if (pipValue == 0)
+    {
+        Print("Warning: Pip value is zero for symbol ", Symbol(), ". Setting default pip value.");
+        pipValue = 0.0001; // Set default pip value if necessary
+    }
+
+    double lotSize = accountRisk / (StopLossPips * pipValue);
+    lotSize *= LotSizeAdjustment; // Adjust the lot size by the adjustment factor
+    return NormalizeDouble(lotSize, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check if an order exists                                          |
+//+------------------------------------------------------------------+
+bool OrderExists(int orderType)
+{
+    for (int i = OrdersTotal() - 1; i >= 0; i--)
+    {
+        if (OrderSelect(i, SELECT_BY_POS) && OrderType() == orderType)
+            return true;
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check if the MACD histogram shows a reversal                      |
+//+------------------------------------------------------------------+
+bool IsReversal(double &hist[], int orderType)
+{
+    static double lastHist = 0;
+    static double currentHist = 0;
+    static double nextHist = 0;
+
+    nextHist = hist[0];
+
+    bool isReversal = false;
+    
+    if (orderType == OP_BUY)
+    {
+        isReversal = (currentHist > lastHist && currentHist > nextHist); // Peak detection for buy orders
+    }
+    else if (orderType == OP_SELL)
+    {
+        isReversal = (currentHist < lastHist && currentHist < nextHist); // Peak detection for sell orders
+    }
+
+    lastHist = currentHist;
+    currentHist = nextHist;
+
+    return isReversal;
+}
+
+//+------------------------------------------------------------------+
+//| Close an order                                                    |
+//+------------------------------------------------------------------+
+void CloseOrder(int orderType)
+{
+    for (int i = OrdersTotal() - 1; i >= 0; i--)
+    {
+        if (OrderSelect(i, SELECT_BY_POS) && OrderType() == orderType)
+        {
+            if (OrderClose(OrderTicket(), OrderLots(), OrderClosePrice(), 3, clrRed))
+            {
+                Print("Order closed: ", OrderTicket());
+            }
+            else
+            {
+                Print("Error closing order: ", ErrorDescription(GetLastError()));
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Manage open orders for trailing stop and break-even               |
+//+------------------------------------------------------------------+
+void ManageOpenOrders()
+{
+    for (int i = OrdersTotal() - 1; i >= 0; i--)
+    {
+        if (OrderSelect(i, SELECT_BY_POS))
+        {
+            double orderOpenPrice = OrderOpenPrice();
+            double orderStopLoss = OrderStopLoss();
+            double orderTakeProfit = OrderTakeProfit();
+            double orderCurrentPrice = (OrderType() == OP_BUY) ? Bid : Ask;
+            double breakEvenPrice = (OrderType() == OP_BUY) ? orderOpenPrice + BreakEvenPips * Point : orderOpenPrice - BreakEvenPips * Point;
+
+            // Break-even logic
+            if ((OrderType() == OP_BUY && orderCurrentPrice >= breakEvenPrice) || (OrderType() == OP_SELL && orderCurrentPrice <= breakEvenPrice))
+            {
+                if ((OrderType() == OP_BUY && orderStopLoss < orderOpenPrice) || (OrderType() == OP_SELL && orderStopLoss > orderOpenPrice))
+                {
+                    if (!OrderModify(OrderTicket(), orderOpenPrice, orderOpenPrice, orderTakeProfit, 0, clrBlue))
+                    {
+                        Print("Error modifying order: ", ErrorDescription(GetLastError()));
+                    }
+                }
+            }
+
+            // Trailing stop logic
+            if ((OrderType() == OP_BUY && orderCurrentPrice - orderStopLoss > TrailingStopPips * Point) || (OrderType() == OP_SELL && orderStopLoss - orderCurrentPrice > TrailingStopPips * Point))
+            {
+                double newStopLoss = (OrderType() == OP_BUY) ? orderCurrentPrice - TrailingStepPips * Point : orderCurrentPrice + TrailingStepPips * Point;
+                if (!OrderModify(OrderTicket(), orderOpenPrice, newStopLoss, orderTakeProfit, 0, clrBlue))
+                {
+                    Print("Error modifying order: ", ErrorDescription(GetLastError()));
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Get error description                                             |
+//+------------------------------------------------------------------+
+string ErrorDescription(int errorCode)
+{
+    switch (errorCode)
+    {
+        case 1: return "No error returned";
+        case 2: return "Common error";
+        case 3: return "Invalid trade parameters";
+        case 4: return "Trade server is busy";
+        // Add more cases as needed
+        default: return "Unknown error";
+    }
+}
